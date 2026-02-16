@@ -353,7 +353,7 @@ class RemoteServerClient:
     async def mount_tree(
         self,
         server_path: str,
-        local_path: str,
+        local_path: Union[str, Path],
         mount_file: Optional[Callable[[str], bool]] = None,
     ) -> dict:
         local_path_obj = Path(local_path)
