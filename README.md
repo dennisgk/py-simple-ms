@@ -51,6 +51,20 @@ Download (server -> client):
 
 Progress is printed on the client command line for `file_put`, `file_get`, and `mount_tree`.
 
+## Experimental WebRTC Transfer Mode
+
+- `file_put`, `file_get`, and `mount_tree` support `transfer_mode="webrtc"`.
+- If WebRTC setup fails, client falls back automatically to websocket transfer.
+- Server requires `aiortc` installed (included in `py-simple-ms-server/requirements.txt`).
+
+Examples:
+
+```python
+await c.file_put("/remote/data.bin", "local/data.bin", transfer_mode="webrtc")
+await c.file_get("/remote/data.bin", "local/data.bin", transfer_mode="webrtc")
+await c.mount_tree("/remote/workflow", "./workflow", transfer_mode="webrtc", chunk_size=2*1024*1024)
+```
+
 ## Session Exec Streaming
 
 - `session_exec` streams runtime output while code is still executing.

@@ -126,6 +126,8 @@ class ServerApp:
         self.uploads: Dict[str, Dict[str, UploadState]] = {}
         # tunnel_id -> download_id -> download state
         self.downloads: Dict[str, Dict[str, DownloadState]] = {}
+        # tunnel_id -> transfer_id -> RTC peer connection
+        self.rtc_transfers: Dict[str, Dict[str, Any]] = {}
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
 
@@ -430,8 +432,132 @@ class ServerApp:
                 self.file_get_end(tunnel_id, download_id)
         self.downloads.pop(tunnel_id, None)
 
+        for transfer_id, pc in list(self.rtc_transfers.get(tunnel_id, {}).items()):
+            with contextlib.suppress(Exception):
+                asyncio.create_task(pc.close())
+            self.rtc_transfers.get(tunnel_id, {}).pop(transfer_id, None)
+        self.rtc_transfers.pop(tunnel_id, None)
+
         self.crypto.pop(tunnel_id, None)
         self.handshake.pop(tunnel_id, None)
+
+    async def _wait_ice_complete(self, pc: Any, timeout: float = 8.0) -> None:
+        start = asyncio.get_running_loop().time()
+        while getattr(pc, "iceGatheringState", "") != "complete":
+            if asyncio.get_running_loop().time() - start > timeout:
+                break
+            await asyncio.sleep(0.05)
+
+    async def webrtc_transfer_open(self, tunnel_id: str, mode: str, path: str, chunk_size: int, offer_sdp: str, offer_type: str) -> Dict[str, Any]:
+        try:
+            from aiortc import RTCPeerConnection, RTCSessionDescription
+        except Exception as e:
+            return {"ok": False, "error": f"aiortc unavailable: {e}"}
+
+        transfer_id = secrets.token_hex(8)
+        pc = RTCPeerConnection()
+        self.rtc_transfers.setdefault(tunnel_id, {})[transfer_id] = pc
+
+        async def close_pc() -> None:
+            with contextlib.suppress(Exception):
+                await pc.close()
+            self.rtc_transfers.get(tunnel_id, {}).pop(transfer_id, None)
+
+        try:
+            if mode == "put":
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                temp_path = f"{path}.rtc.{transfer_id}.part"
+                state: Dict[str, Any] = {"fh": None, "bytes": 0}
+
+                @pc.on("datachannel")
+                def on_datachannel(channel: Any) -> None:
+                    @channel.on("message")
+                    def on_message(message: Any) -> None:
+                        try:
+                            if isinstance(message, str):
+                                obj = json.loads(message)
+                                mtype = obj.get("type")
+                                if mtype == "meta":
+                                    state["fh"] = open(temp_path, "wb")
+                                elif mtype == "eof":
+                                    fh = state.get("fh")
+                                    if fh:
+                                        fh.flush()
+                                        fh.close()
+                                        os.replace(temp_path, path)
+                                    channel.send(json.dumps({"type": "ack", "ok": True, "bytes": state["bytes"]}))
+                                    asyncio.create_task(close_pc())
+                            else:
+                                fh = state.get("fh")
+                                if fh is not None:
+                                    chunk = bytes(message)
+                                    fh.write(chunk)
+                                    state["bytes"] += len(chunk)
+                        except Exception as e:
+                            channel.send(json.dumps({"type": "ack", "ok": False, "error": str(e)}))
+                            asyncio.create_task(close_pc())
+
+            elif mode == "get":
+                file_path = Path(path)
+                if not file_path.exists() or not file_path.is_file():
+                    await close_pc()
+                    return {"ok": False, "error": f"file not found: {path}"}
+                file_size = file_path.stat().st_size
+                effective_chunk = min(max(1, int(chunk_size)), MAX_CHUNK_SIZE)
+                state: Dict[str, Any] = {"started": False}
+
+                @pc.on("datachannel")
+                def on_datachannel(channel: Any) -> None:
+                    @channel.on("message")
+                    def on_message(message: Any) -> None:
+                        if not isinstance(message, str):
+                            return
+                        try:
+                            obj = json.loads(message)
+                            mtype = obj.get("type")
+                            if mtype == "ack":
+                                asyncio.create_task(close_pc())
+                                return
+                            if mtype != "ready" or state["started"]:
+                                return
+                        except Exception:
+                            return
+
+                        async def send_file() -> None:
+                            try:
+                                channel.send(json.dumps({"type": "meta", "size": file_size}))
+                                with file_path.open("rb") as f:
+                                    while True:
+                                        chunk = f.read(effective_chunk)
+                                        if not chunk:
+                                            break
+                                        channel.send(chunk)
+                                        while channel.bufferedAmount > (8 * 1024 * 1024):
+                                            await asyncio.sleep(0.01)
+                                channel.send(json.dumps({"type": "eof"}))
+                            except Exception:
+                                await close_pc()
+
+                        state["started"] = True
+                        asyncio.create_task(send_file())
+            else:
+                await close_pc()
+                return {"ok": False, "error": f"invalid mode: {mode}"}
+
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            await self._wait_ice_complete(pc)
+            return {
+                "ok": True,
+                "transfer_id": transfer_id,
+                "answer_sdp": pc.localDescription.sdp,
+                "answer_type": pc.localDescription.type,
+                "transport": "webrtc",
+            }
+        except Exception as e:
+            await close_pc()
+            return {"ok": False, "error": f"webrtc_transfer_open failed: {e}"}
 
     # ---------------------------
     # Protocol handling
@@ -565,6 +691,15 @@ class ServerApp:
                 files = list(obj.get("files", []))
                 prune = bool(obj.get("prune", False))
                 await reply(self.mount_tree_diff(base_path, files, prune=prune))
+                return
+
+            if cmd == "webrtc_transfer_open":
+                mode = str(obj.get("mode", ""))
+                path = str(obj.get("path", ""))
+                chunk_size = int(obj.get("chunk_size", 256 * 1024))
+                offer_sdp = str(obj.get("offer_sdp", ""))
+                offer_type = str(obj.get("offer_type", ""))
+                await reply(await self.webrtc_transfer_open(tunnel_id, mode, path, chunk_size, offer_sdp, offer_type))
                 return
 
             if cmd == "session_start":

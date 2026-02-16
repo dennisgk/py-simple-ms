@@ -243,6 +243,149 @@ class RemoteServerClient:
         await self._send_tunnel_enc({"req_id": req_id, "cmd": cmd, **kwargs})
         return await fut
 
+    async def _wait_ice_complete(self, pc: Any, timeout: float = 8.0) -> None:
+        start = asyncio.get_running_loop().time()
+        while getattr(pc, "iceGatheringState", "") != "complete":
+            if asyncio.get_running_loop().time() - start > timeout:
+                break
+            await asyncio.sleep(0.05)
+
+    async def _webrtc_open_transfer(self, mode: str, remote_path: str, chunk_size: int) -> tuple:
+        try:
+            from aiortc import RTCPeerConnection, RTCSessionDescription
+        except Exception as e:
+            raise RuntimeError(f"aiortc unavailable: {e}") from e
+
+        pc = RTCPeerConnection()
+        channel = pc.createDataChannel("file")
+        open_fut = asyncio.get_running_loop().create_future()
+        msg_q: asyncio.Queue = asyncio.Queue()
+
+        @channel.on("open")
+        def _on_open() -> None:
+            if not open_fut.done():
+                open_fut.set_result(True)
+
+        @channel.on("message")
+        def _on_message(message: Any) -> None:
+            msg_q.put_nowait(message)
+
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        await self._wait_ice_complete(pc)
+
+        resp = await self.request(
+            "webrtc_transfer_open",
+            mode=mode,
+            path=remote_path,
+            chunk_size=chunk_size,
+            offer_sdp=pc.localDescription.sdp,
+            offer_type=pc.localDescription.type,
+        )
+        if not resp.get("ok"):
+            await pc.close()
+            raise RuntimeError(resp.get("error", "webrtc open failed"))
+
+        answer = RTCSessionDescription(sdp=str(resp["answer_sdp"]), type=str(resp["answer_type"]))
+        await pc.setRemoteDescription(answer)
+        await asyncio.wait_for(open_fut, timeout=10.0)
+        return pc, channel, msg_q
+
+    async def _webrtc_file_put(self, remote_path: str, data: Union[bytes, str, Path], chunk_size: int) -> dict:
+        if isinstance(data, bytes):
+            total_size = len(data)
+
+            def _iter_chunks() -> Any:
+                for i in range(0, len(data), chunk_size):
+                    yield data[i:i + chunk_size]
+        else:
+            local_path = Path(data)
+            if not local_path.exists() or not local_path.is_file():
+                return {"ok": False, "error": f"local source file not found: {local_path}"}
+            total_size = local_path.stat().st_size
+
+            def _iter_chunks() -> Any:
+                with local_path.open("rb") as f:
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
+
+        pc, channel, msg_q = await self._webrtc_open_transfer("put", remote_path, chunk_size)
+        try:
+            channel.send(json.dumps({"type": "meta", "size": total_size}))
+            uploaded = 0
+            for chunk in _iter_chunks():
+                channel.send(chunk)
+                uploaded += len(chunk)
+                self._print_progress(f"file_put {remote_path} (webrtc)", uploaded, total_size)
+                while channel.bufferedAmount > (8 * 1024 * 1024):
+                    await asyncio.sleep(0.01)
+            channel.send(json.dumps({"type": "eof"}))
+            self._end_progress()
+
+            while True:
+                msg = await asyncio.wait_for(msg_q.get(), timeout=20.0)
+                if isinstance(msg, str):
+                    obj = json.loads(msg)
+                    if obj.get("type") == "ack":
+                        return {"ok": bool(obj.get("ok", False)), "bytes": int(obj.get("bytes", 0)), "transport": "webrtc"}
+        finally:
+            await pc.close()
+
+    async def _webrtc_file_get(
+        self,
+        remote_path: str,
+        save_to: Optional[Union[str, Path]],
+        chunk_size: int,
+    ) -> Union[bytes, dict]:
+        pc, channel, msg_q = await self._webrtc_open_transfer("get", remote_path, chunk_size)
+        out_path = Path(save_to) if save_to is not None else None
+        out_f = None
+        chunks = bytearray() if out_path is None else None
+        total_size = 0
+        written = 0
+
+        try:
+            if out_path is not None:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_f = out_path.open("wb")
+
+            channel.send(json.dumps({"type": "ready"}))
+            while True:
+                msg = await asyncio.wait_for(msg_q.get(), timeout=30.0)
+                if isinstance(msg, str):
+                    obj = json.loads(msg)
+                    mtype = obj.get("type")
+                    if mtype == "meta":
+                        total_size = int(obj.get("size", 0))
+                        continue
+                    if mtype == "eof":
+                        channel.send(json.dumps({"type": "ack", "ok": True, "bytes": written}))
+                        break
+                    continue
+
+                chunk = bytes(msg)
+                written += len(chunk)
+                if out_f is not None:
+                    out_f.write(chunk)
+                else:
+                    assert chunks is not None
+                    chunks.extend(chunk)
+                self._print_progress(f"file_get {remote_path} (webrtc)", written, total_size)
+
+            self._end_progress()
+        finally:
+            if out_f is not None:
+                out_f.close()
+            await pc.close()
+
+        if out_path is not None:
+            return {"ok": True, "path": str(out_path), "bytes": written, "transport": "webrtc"}
+        assert chunks is not None
+        return bytes(chunks)
+
     @staticmethod
     def _fmt_bytes(n: int) -> str:
         units = ["B", "KB", "MB", "GB", "TB"]
@@ -279,7 +422,19 @@ class RemoteServerClient:
     async def pyenv_delete(self, env_name: str) -> dict:
         return await self.request("pyenv_delete", env_name=env_name)
 
-    async def file_put(self, path: str, data: Union[bytes, str, Path], chunk_size: int = FILE_CHUNK_SIZE) -> dict:
+    async def file_put(
+        self,
+        path: str,
+        data: Union[bytes, str, Path],
+        chunk_size: int = FILE_CHUNK_SIZE,
+        transfer_mode: str = "ws",
+    ) -> dict:
+        if transfer_mode == "webrtc":
+            try:
+                return await self._webrtc_file_put(path, data, chunk_size)
+            except Exception as e:
+                print(f"[client] webrtc file_put fallback to ws: {e}", file=sys.stderr)
+
         # bytes -> upload content directly.
         # str/Path -> treated as a local file path to upload.
         if isinstance(data, bytes):
@@ -349,7 +504,14 @@ class RemoteServerClient:
         path: str,
         save_to: Optional[Union[str, Path]] = None,
         chunk_size: int = FILE_CHUNK_SIZE,
+        transfer_mode: str = "ws",
     ) -> Union[bytes, dict]:
+        if transfer_mode == "webrtc":
+            try:
+                return await self._webrtc_file_get(path, save_to, chunk_size)
+            except Exception as e:
+                print(f"[client] webrtc file_get fallback to ws: {e}", file=sys.stderr)
+
         start = await self.request("file_get_begin", path=path)
         if not start.get("ok"):
             raise FileNotFoundError(start.get("error", "file_get_begin failed"))
@@ -409,6 +571,8 @@ class RemoteServerClient:
         server_path: str,
         local_path: Union[str, Path],
         mount_file: Optional[Callable[[str], bool]] = None,
+        chunk_size: int = FILE_CHUNK_SIZE,
+        transfer_mode: str = "ws",
     ) -> dict:
         local_path_obj = Path(local_path)
         local_root = local_path_obj.resolve()
@@ -463,7 +627,7 @@ class RemoteServerClient:
                 return {"ok": False, "error": f"server requested unknown file: {rel_path}"}
 
             dst = str(PurePosixPath(target_base) / rel_path)
-            resp = await self.file_put(dst, src)
+            resp = await self.file_put(dst, src, chunk_size=chunk_size, transfer_mode=transfer_mode)
             if not resp.get("ok"):
                 return {"ok": False, "error": f"failed uploading {rel_path}", "upload_error": resp}
             uploaded += 1

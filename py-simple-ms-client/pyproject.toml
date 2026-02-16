@@ -11,6 +11,7 @@ dependencies = [
   "websockets==11.0.3",
   "cryptography>=42.0.0",
   "brotli>=1.1.0",
+  "aiortc>=1.9.0",
 ]
 
 [project.scripts]
