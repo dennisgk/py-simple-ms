@@ -189,7 +189,11 @@ class RemoteServerClient:
                     if obj.get("type") == "session_stream":
                         stream_name = obj.get("stream")
                         data = str(obj.get("data", ""))
-                        out = sys.stderr if stream_name == "stderr" else sys.stdout
+                        # Some terminals/UIs don't render ANSI colors on stderr.
+                        if stream_name == "stderr" and "\x1b[" in data:
+                            out = sys.stdout
+                        else:
+                            out = sys.stderr if stream_name == "stderr" else sys.stdout
                         out.write(data)
                         out.flush()
                         continue
