@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import sys
 import traceback
 
@@ -43,6 +44,11 @@ for line in sys.stdin:
         code = str(msg.get("code", ""))
         ok = True
         tb = ""
+
+        # Ensure imports resolve from the session working directory.
+        cwd = os.getcwd()
+        if cwd not in sys.path:
+            sys.path.insert(0, cwd)
 
         with contextlib.redirect_stdout(StreamEmitter("stdout")), contextlib.redirect_stderr(StreamEmitter("stderr")):
             try:
