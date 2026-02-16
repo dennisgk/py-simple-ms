@@ -50,6 +50,8 @@ for line in sys.stdin:
             except Exception:
                 ok = False
                 tb = traceback.format_exc()
+                # Mirror uncaught execution errors to streamed stderr.
+                respond({"type": "stream", "stream": "stderr", "data": tb})
 
         respond({"type": "exec_result", "ok": ok, "traceback": tb})
     except Exception:
