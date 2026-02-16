@@ -20,6 +20,7 @@ cd py-simple-ms
 
 - Transport: WebSocket frames between all components.
 - Frame encoding: every outbound message is JSON encoded then Brotli compressed.
+- Proxy access gate: `PROXY_PSK` is validated by proxy during server/client registration.
 - Tunnel crypto: after auth, payloads use ChaCha20-Poly1305 with per-message sequence numbers.
 - Auth: pre-shared key (`PSK_HEX`) challenge-response with HMAC-SHA256.
 - Key derivation: HKDF-SHA256 derives directional keys (`c2s`, `s2c`).
@@ -47,6 +48,8 @@ Download (server -> client):
 - `file_get_begin(path)` -> `download_id`
 - repeated `file_get_chunk(download_id, chunk_size)` until `done=true`
 - `file_get_end(download_id)`
+
+Progress is printed on the client command line for `file_put`, `file_get`, and `mount_tree`.
 
 ## Session Exec Streaming
 
@@ -101,10 +104,12 @@ python -c "from py_simple_ms_client import RemoteServerClient; print(RemoteServe
 ## Run
 
 Use the same `PSK_HEX` for client and server.
+Use the same `PROXY_PSK` for proxy, server, and client.
 
 ```bash
 # Example 32-byte key (64 hex chars)
 export PSK_HEX=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+export PROXY_PSK=replace-with-shared-proxy-key
 ```
 
 Start proxy (keeps env-style config):
@@ -118,6 +123,7 @@ Start server (keeps env-style config):
 ```bash
 export PROXY_URL=ws://127.0.0.1:8765
 export SERVER_NAME=server-1
+export PROXY_PSK="$PROXY_PSK"
 python3 py-simple-ms-server/server.py
 ```
 
@@ -126,6 +132,7 @@ Server can also load these from `py-simple-ms-server/.env`:
 ```dotenv
 PROXY_URL=ws://127.0.0.1:8765
 SERVER_NAME=server-1
+PROXY_PSK=replace-with-shared-proxy-key
 PSK_HEX=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 ```
 
@@ -135,7 +142,8 @@ Start client demo (pass required args directly):
 py-simple-ms-client \
   --proxy-url ws://127.0.0.1:8765 \
   --server-name server-1 \
-  --psk-hex "$PSK_HEX"
+  --psk-hex "$PSK_HEX" \
+  --proxy-psk "$PROXY_PSK"
 ```
 
 ## Docker (Proxy Sample)
@@ -155,6 +163,8 @@ docker compose -f py-simple-ms-proxy/docker-compose.yml up --build -d
 docker compose -f py-simple-ms-proxy/docker-compose.yml logs -f proxy
 docker compose -f py-simple-ms-proxy/docker-compose.yml down
 ```
+
+Set `PROXY_PSK` in your shell (or `.env` for compose) before `docker compose up`.
 
 ## Notes
 

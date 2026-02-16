@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     image: py-simple-ms-proxy:sample
     container_name: py-simple-ms-proxy
+    environment:
+      - PROXY_PSK=${PROXY_PSK}
     ports:
       - "8765:8765"
     restart: unless-stopped

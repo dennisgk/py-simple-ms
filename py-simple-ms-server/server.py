@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from dotenv import load_dotenv
 
 
-MAX_CHUNK_SIZE = 1024 * 1024
+MAX_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 # ---------------------------
@@ -110,10 +110,11 @@ class DownloadState:
 
 
 class ServerApp:
-    def __init__(self, proxy_url: str, server_name: str, psk_hex: str) -> None:
+    def __init__(self, proxy_url: str, server_name: str, psk_hex: str, proxy_psk: str) -> None:
         self.proxy_url = proxy_url
         self.server_name = server_name
         self.psk = bytes.fromhex(psk_hex)
+        self.proxy_psk = proxy_psk
 
         # tunnel_id -> crypto (after auth)
         self.crypto: Dict[str, TunnelCrypto] = {}
@@ -591,7 +592,7 @@ class ServerApp:
     async def run(self) -> None:
         async with websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30) as ws:
             self.ws = ws
-            await self.send({"type": "register_server", "name": self.server_name})
+            await self.send({"type": "register_server", "name": self.server_name, "proxy_psk": self.proxy_psk})
             print(f"[server] registered as {self.server_name}")
 
             # Heartbeat task
@@ -662,12 +663,16 @@ def main() -> None:
     #   export PSK_HEX=...64 hex chars...
     proxy_url = os.environ.get("PROXY_URL", "ws://127.0.0.1:8765")
     server_name = os.environ.get("SERVER_NAME", "server-1")
+    proxy_psk = os.environ.get("PROXY_PSK", "").strip()
     psk_hex = os.environ.get("PSK_HEX")
+    if not proxy_psk:
+        print("Set PROXY_PSK to the shared proxy access key.", file=sys.stderr)
+        sys.exit(1)
     if not psk_hex or len(psk_hex) < 32:
         print("Set PSK_HEX to a hex-encoded shared key (e.g. 64 hex chars = 32 bytes).", file=sys.stderr)
         sys.exit(1)
 
-    app = ServerApp(proxy_url, server_name, psk_hex)
+    app = ServerApp(proxy_url, server_name, psk_hex, proxy_psk)
     asyncio.run(app.run())
 
 

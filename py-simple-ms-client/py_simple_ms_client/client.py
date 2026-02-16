@@ -18,8 +18,8 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
-FILE_CHUNK_SIZE = 256 * 1024
-FILE_CHUNK_THRESHOLD = 512 * 1024
+FILE_CHUNK_SIZE = 2 * 1024 * 1024
+FILE_CHUNK_THRESHOLD = 2 * 1024 * 1024
 
 
 def hmac_sha256(key: bytes, data: bytes) -> bytes:
@@ -79,10 +79,18 @@ class TunnelCrypto:
 
 
 class RemoteServerClient:
-    def __init__(self, proxy_url: str, server_name: str, psk_hex: str, client_id: str = "") -> None:
+    def __init__(
+        self,
+        proxy_url: str,
+        server_name: str,
+        psk_hex: str,
+        proxy_psk: str,
+        client_id: str = "",
+    ) -> None:
         self.proxy_url = proxy_url
         self.server_name = server_name
         self.psk = bytes.fromhex(psk_hex)
+        self.proxy_psk = proxy_psk
         self.client_id = client_id or f"client-{secrets.token_hex(4)}"
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -207,7 +215,7 @@ class RemoteServerClient:
 
     async def connect(self) -> None:
         self.ws = await websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30)
-        await self._send({"type": "register_client", "client_id": self.client_id})
+        await self._send({"type": "register_client", "client_id": self.client_id, "proxy_psk": self.proxy_psk})
         self._reader_task = asyncio.create_task(self._reader())
         await self._send({"type": "client_connect", "server_name": self.server_name})
 
@@ -235,6 +243,32 @@ class RemoteServerClient:
         await self._send_tunnel_enc({"req_id": req_id, "cmd": cmd, **kwargs})
         return await fut
 
+    @staticmethod
+    def _fmt_bytes(n: int) -> str:
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(n)
+        idx = 0
+        while value >= 1024 and idx < len(units) - 1:
+            value /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(value)}{units[idx]}"
+        return f"{value:.1f}{units[idx]}"
+
+    def _print_progress(self, label: str, current: int, total: int) -> None:
+        if total > 0:
+            pct = (current / total) * 100
+            line = f"\r{label}: {pct:6.2f}% ({self._fmt_bytes(current)}/{self._fmt_bytes(total)})"
+        else:
+            line = f"\r{label}: {self._fmt_bytes(current)}"
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+    @staticmethod
+    def _end_progress() -> None:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
     # -------- convenience wrappers --------
     async def pyenv_list(self) -> dict:
         return await self.request("pyenv_list")
@@ -249,8 +283,12 @@ class RemoteServerClient:
         # bytes -> upload content directly.
         # str/Path -> treated as a local file path to upload.
         if isinstance(data, bytes):
+            total_size = len(data)
             if len(data) <= FILE_CHUNK_THRESHOLD:
-                return await self.request("file_put", path=path, data_b64=b64e(data))
+                resp = await self.request("file_put", path=path, data_b64=b64e(data))
+                self._print_progress(f"file_put {path}", total_size, total_size)
+                self._end_progress()
+                return resp
 
             start = await self.request("file_put_begin", path=path)
             if not start.get("ok"):
@@ -258,13 +296,18 @@ class RemoteServerClient:
 
             upload_id = start["upload_id"]
             seq = 0
+            uploaded = 0
             for offset in range(0, len(data), chunk_size):
                 chunk = data[offset:offset + chunk_size]
                 resp = await self.request("file_put_chunk", upload_id=upload_id, seq=seq, data_b64=b64e(chunk))
                 if not resp.get("ok"):
                     await self.request("file_put_abort", upload_id=upload_id)
+                    self._end_progress()
                     return resp
                 seq += 1
+                uploaded += len(chunk)
+                self._print_progress(f"file_put {path}", uploaded, total_size)
+            self._end_progress()
             return await self.request("file_put_end", upload_id=upload_id)
 
         local_path = Path(data)
@@ -273,7 +316,10 @@ class RemoteServerClient:
 
         file_size = local_path.stat().st_size
         if file_size <= FILE_CHUNK_THRESHOLD:
-            return await self.request("file_put", path=path, data_b64=b64e(local_path.read_bytes()))
+            resp = await self.request("file_put", path=path, data_b64=b64e(local_path.read_bytes()))
+            self._print_progress(f"file_put {path}", file_size, file_size)
+            self._end_progress()
+            return resp
 
         start = await self.request("file_put_begin", path=path)
         if not start.get("ok"):
@@ -281,6 +327,7 @@ class RemoteServerClient:
 
         upload_id = start["upload_id"]
         seq = 0
+        uploaded = 0
         with local_path.open("rb") as f:
             while True:
                 chunk = f.read(chunk_size)
@@ -289,8 +336,12 @@ class RemoteServerClient:
                 resp = await self.request("file_put_chunk", upload_id=upload_id, seq=seq, data_b64=b64e(chunk))
                 if not resp.get("ok"):
                     await self.request("file_put_abort", upload_id=upload_id)
+                    self._end_progress()
                     return resp
                 seq += 1
+                uploaded += len(chunk)
+                self._print_progress(f"file_put {path}", uploaded, file_size)
+        self._end_progress()
         return await self.request("file_put_end", upload_id=upload_id)
 
     async def file_get(
@@ -304,6 +355,7 @@ class RemoteServerClient:
             raise FileNotFoundError(start.get("error", "file_get_begin failed"))
 
         download_id = start["download_id"]
+        total_size = int(start.get("bytes", 0))
         written = 0
         chunks = bytearray() if save_to is None else None
         out_path = Path(save_to) if save_to is not None else None
@@ -328,6 +380,7 @@ class RemoteServerClient:
                     else:
                         assert chunks is not None
                         chunks.extend(chunk)
+                    self._print_progress(f"file_get {path}", written, total_size)
 
                 if resp.get("done"):
                     break
@@ -335,6 +388,7 @@ class RemoteServerClient:
             if out_f is not None:
                 out_f.close()
             await self.request("file_get_end", download_id=download_id)
+            self._end_progress()
 
         if out_path is not None:
             return {"ok": True, "path": str(out_path), "bytes": written}
@@ -387,6 +441,12 @@ class RemoteServerClient:
                     "size": path.stat().st_size,
                 }
             )
+            if len(manifest) % 50 == 0:
+                self._print_progress("mount_tree scan files", len(manifest), 0)
+
+        if manifest:
+            self._print_progress("mount_tree scan files", len(manifest), len(manifest))
+            self._end_progress()
 
         diff = await self.request("mount_tree_diff", base_path=target_base, files=manifest, prune=True)
         if not diff.get("ok"):
@@ -395,17 +455,22 @@ class RemoteServerClient:
         needed = diff.get("needed", [])
         deleted = int(diff.get("deleted", 0))
         uploaded = 0
+        needed_total = len(needed)
 
-        for rel_path in needed:
+        for idx, rel_path in enumerate(needed, start=1):
             src = file_map.get(rel_path)
             if src is None:
                 return {"ok": False, "error": f"server requested unknown file: {rel_path}"}
 
             dst = str(PurePosixPath(target_base) / rel_path)
-            resp = await self.file_put(dst, src.read_bytes())
+            resp = await self.file_put(dst, src)
             if not resp.get("ok"):
                 return {"ok": False, "error": f"failed uploading {rel_path}", "upload_error": resp}
             uploaded += 1
+            self._print_progress("mount_tree upload files", idx, needed_total)
+
+        if needed_total:
+            self._end_progress()
 
         return {
             "ok": True,
@@ -420,8 +485,8 @@ class RemoteServerClient:
 # ---------------------------
 # Example CLI usage
 # ---------------------------
-async def demo(proxy_url: str, server_name: str, psk_hex: str) -> None:
-    c = RemoteServerClient(proxy_url=proxy_url, server_name=server_name, psk_hex=psk_hex)
+async def demo(proxy_url: str, server_name: str, psk_hex: str, proxy_psk: str) -> None:
+    c = RemoteServerClient(proxy_url=proxy_url, server_name=server_name, psk_hex=psk_hex, proxy_psk=proxy_psk)
     await c.connect()
 
     print(await c.pyenv_list())
@@ -441,12 +506,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proxy-url", required=True, help="Proxy websocket URL, e.g. ws://127.0.0.1:8765")
     parser.add_argument("--server-name", required=True, help="Registered server name to connect to")
     parser.add_argument("--psk-hex", required=True, help="Hex-encoded pre-shared key")
+    parser.add_argument("--proxy-psk", required=True, help="Shared proxy access key")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    asyncio.run(demo(args.proxy_url, args.server_name, args.psk_hex))
+    asyncio.run(demo(args.proxy_url, args.server_name, args.psk_hex, args.proxy_psk))
 
 
 if __name__ == "__main__":

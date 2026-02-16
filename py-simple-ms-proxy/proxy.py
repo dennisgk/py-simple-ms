@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import json
+import os
 import secrets
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -38,7 +39,8 @@ class Tunnel:
 
 
 class Proxy:
-    def __init__(self) -> None:
+    def __init__(self, proxy_psk: str) -> None:
+        self.proxy_psk = proxy_psk
         self.servers_by_name: Dict[str, Peer] = {}
         self.clients_by_ws: Dict[WebSocketServerProtocol, Peer] = {}
         self.tunnels: Dict[str, Tunnel] = {}
@@ -65,6 +67,10 @@ class Proxy:
                 mtype = msg.get("type")
 
                 if mtype == "register_server":
+                    if str(msg.get("proxy_psk", "")) != self.proxy_psk:
+                        await self._send(ws, {"type": "error", "error": "invalid proxy_psk"})
+                        await ws.close(code=1008, reason="invalid proxy_psk")
+                        return
                     name = str(msg.get("name", "")).strip()
                     if not name:
                         await self._send(ws, {"type": "error", "error": "missing server name"})
@@ -76,6 +82,10 @@ class Proxy:
                     continue
 
                 if mtype == "register_client":
+                    if str(msg.get("proxy_psk", "")) != self.proxy_psk:
+                        await self._send(ws, {"type": "error", "error": "invalid proxy_psk"})
+                        await ws.close(code=1008, reason="invalid proxy_psk")
+                        return
                     client_id = str(msg.get("client_id", "")).strip() or f"client-{secrets.token_hex(4)}"
                     peer = Peer(ws=ws, kind="client", name=client_id)
                     self.clients_by_ws[ws] = peer
@@ -149,7 +159,11 @@ class Proxy:
 
 
 async def main() -> None:
-    proxy = Proxy()
+    proxy_psk = os.environ.get("PROXY_PSK", "").strip()
+    if not proxy_psk:
+        raise RuntimeError("Set PROXY_PSK environment variable for proxy access control.")
+
+    proxy = Proxy(proxy_psk=proxy_psk)
     host = "0.0.0.0"
     port = 8765
     print(f"[proxy] listening on ws://{host}:{port}")
