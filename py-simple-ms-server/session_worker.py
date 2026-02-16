@@ -24,7 +24,6 @@ def respond(obj: dict) -> None:
 class StreamEmitter(io.TextIOBase):
     def __init__(self, stream_name: str) -> None:
         self.stream_name = stream_name
-        self.encoding = "utf-8"
 
     def write(self, s: str) -> int:
         if not s:
