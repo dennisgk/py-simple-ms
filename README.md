@@ -13,7 +13,7 @@ cd py-simple-ms
 
 - `py-simple-ms-proxy/proxy.py`: WebSocket relay that routes messages between client and server by tunnel ID.
 - `py-simple-ms-server/server.py`: Remote server endpoint. Authenticates client, decrypts commands, runs pyenv/session/file operations.
-- `py-simple-ms-client/client.py`: Client SDK + demo usage.
+- `py-simple-ms-client/py_simple_ms_client/client.py`: Client SDK + demo usage.
 - `py-simple-ms-server/session_worker.py`: Worker process used by server sessions for repeated `exec` calls.
 
 ## Transport And Security
@@ -56,12 +56,37 @@ Download (server -> client):
 
 ## Setup
 
-Install dependencies per component:
+Install proxy/server dependencies locally if you run those from source:
 
 ```bash
 pip install -r py-simple-ms-proxy/requirements.txt
 pip install -r py-simple-ms-server/requirements.txt
-pip install -r py-simple-ms-client/requirements.txt
+```
+
+### Client Install (Linux + pyenv)
+
+```bash
+# select/activate your pyenv environment first
+pyenv activate <env-name>
+
+pip install git+https://github.com/dennisgk/py-simple-ms.git#subdirectory=py-simple-ms-client
+```
+
+### Client Install (Windows + venv)
+
+```powershell
+# activate your venv first
+.\.venv\Scripts\Activate.ps1
+
+pip install git+https://github.com/dennisgk/py-simple-ms.git#subdirectory=py-simple-ms-client
+```
+
+Client dependencies are installed automatically from `py-simple-ms-client/pyproject.toml`.
+
+Verify install/import:
+
+```bash
+python -c "from py_simple_ms_client import RemoteServerClient; print(RemoteServerClient.__name__)"
 ```
 
 ## Run
@@ -90,7 +115,7 @@ python3 py-simple-ms-server/server.py
 Start client demo (pass required args directly):
 
 ```bash
-python3 py-simple-ms-client/client.py \
+py-simple-ms-client \
   --proxy-url ws://127.0.0.1:8765 \
   --server-name server-1 \
   --psk-hex "$PSK_HEX"

@@ -310,6 +310,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
     args = parse_args()
     asyncio.run(demo(args.proxy_url, args.server_name, args.psk_hex))
+
+
+if __name__ == "__main__":
+    main()

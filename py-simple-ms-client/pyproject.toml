@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py-simple-ms-client"
+version = "0.1.0"
+description = "Client package for py-simple-ms"
+requires-python = ">=3.9"
+dependencies = [
+  "websockets==11.0.3",
+  "cryptography>=42.0.0",
+  "brotli>=1.1.0",
+]
+
+[project.scripts]
+py-simple-ms-client = "py_simple_ms_client.client:main"
+
+[tool.setuptools]
+packages = ["py_simple_ms_client"]
