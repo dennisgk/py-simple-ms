@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import ast
+import asyncio
 import contextlib
 import io
+import inspect
 import json
 import os
 import sys
@@ -52,7 +55,10 @@ for line in sys.stdin:
 
         with contextlib.redirect_stdout(StreamEmitter("stdout")), contextlib.redirect_stderr(StreamEmitter("stderr")):
             try:
-                exec(code, GLOBAL_SCOPE, GLOBAL_SCOPE)
+                compiled = compile(code, "<session_exec>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                result = eval(compiled, GLOBAL_SCOPE, GLOBAL_SCOPE)
+                if inspect.iscoroutine(result):
+                    asyncio.run(result)
             except Exception:
                 ok = False
                 tb = traceback.format_exc()
