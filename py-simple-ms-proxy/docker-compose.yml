@@ -20,18 +20,33 @@ services:
   turn:
     image: coturn/coturn:4.6.3
     container_name: py-simple-ms-turn
+    entrypoint: /bin/sh
     command:
-      - -n
-      - --listening-port=3478
-      - --realm=${TURN_REALM:-py-simple-ms.local}
-      - --lt-cred-mech
-      - --user=${TURN_USER:-pyms}:${TURN_PASSWORD:-pyms-pass}
-      - --fingerprint
-      - --no-cli
-      - --listening-ip=0.0.0.0
-      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
-      - --min-port=49160
-      - --max-port=49200
+      - -ec
+      - |
+        EXT_IP="${TURN_EXTERNAL_IP:-}"
+        if [ -z "$EXT_IP" ] && [ -n "${TURN_PUBLIC_HOST:-}" ] && command -v getent >/dev/null 2>&1; then
+          EXT_IP="$(getent ahostsv4 "$TURN_PUBLIC_HOST" | awk 'NR==1{print $1}')"
+        fi
+        EXTERNAL_ARG=""
+        if [ -n "$EXT_IP" ]; then
+          EXTERNAL_ARG="--external-ip=$EXT_IP"
+          echo "[turn] using external ip: $EXT_IP"
+        else
+          echo "[turn] TURN_EXTERNAL_IP not set and auto-resolve failed; starting without --external-ip"
+        fi
+        exec turnserver \
+          -n \
+          --listening-port=3478 \
+          --realm=${TURN_REALM:-py-simple-ms.local} \
+          --lt-cred-mech \
+          --user=${TURN_USER:-pyms}:${TURN_PASSWORD:-pyms-pass} \
+          --fingerprint \
+          --no-cli \
+          --listening-ip=0.0.0.0 \
+          $EXTERNAL_ARG \
+          --min-port=49160 \
+          --max-port=49200
     ports:
       - "${TURN_PORT:-3478}:3478/tcp"
       - "${TURN_PORT:-3478}:3478/udp"

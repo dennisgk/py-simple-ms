@@ -206,6 +206,10 @@ export TURN_USER=pyms
 export TURN_PASSWORD=pyms-pass
 ```
 
+`TURN_EXTERNAL_IP` is optional in docker-compose now:
+- If unset, the TURN container tries to resolve IPv4 from `TURN_PUBLIC_HOST` at startup.
+- Set `TURN_EXTERNAL_IP` explicitly if DNS resolution is wrong or your host is behind complex NAT.
+
 ## Notes
 
 - Server-side pyenv commands require `pyenv` (and for env listing, `pyenv-virtualenv`).
