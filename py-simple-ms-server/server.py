@@ -16,6 +16,7 @@ import websockets
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from dotenv import load_dotenv
 
 
 MAX_CHUNK_SIZE = 1024 * 1024
@@ -569,6 +570,9 @@ class ServerApp:
 
 
 def main() -> None:
+    # Load server env vars from a local .env file if present.
+    load_dotenv()
+
     # Example:
     #   export PROXY_URL=ws://127.0.0.1:8765
     #   export SERVER_NAME=mybox

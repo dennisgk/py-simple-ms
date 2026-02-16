@@ -1,0 +1,10 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: py-simple-ms-proxy:sample
+    container_name: py-simple-ms-proxy
+    ports:
+      - "8765:8765"
+    restart: unless-stopped

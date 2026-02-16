@@ -56,10 +56,19 @@ Download (server -> client):
 
 ## Setup
 
-Install proxy/server dependencies locally if you run those from source:
+You can fetch only the `py-simple-ms-server` folder using sparse checkout:
 
 ```bash
-pip install -r py-simple-ms-proxy/requirements.txt
+git clone --filter=blob:none --no-checkout https://github.com/dennisgk/py-simple-ms.git
+cd py-simple-ms
+git sparse-checkout init --cone
+git sparse-checkout set py-simple-ms-server
+git checkout main
+```
+
+Then install server dependencies:
+
+```bash
 pip install -r py-simple-ms-server/requirements.txt
 ```
 
@@ -112,6 +121,14 @@ export SERVER_NAME=server-1
 python3 py-simple-ms-server/server.py
 ```
 
+Server can also load these from `py-simple-ms-server/.env`:
+
+```dotenv
+PROXY_URL=ws://127.0.0.1:8765
+SERVER_NAME=server-1
+PSK_HEX=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+```
+
 Start client demo (pass required args directly):
 
 ```bash
@@ -124,10 +141,19 @@ py-simple-ms-client \
 ## Docker (Proxy Sample)
 
 Sample Dockerfile is at `py-simple-ms-proxy/Dockerfile` and clones this repo during build.
+Compose file is at `py-simple-ms-proxy/docker-compose.yml`.
 
 ```bash
 docker build -f py-simple-ms-proxy/Dockerfile -t py-simple-ms-proxy:sample .
 docker run --rm -p 8765:8765 py-simple-ms-proxy:sample
+```
+
+Or with Docker Compose:
+
+```bash
+docker compose -f py-simple-ms-proxy/docker-compose.yml up --build -d
+docker compose -f py-simple-ms-proxy/docker-compose.yml logs -f proxy
+docker compose -f py-simple-ms-proxy/docker-compose.yml down
 ```
 
 ## Notes
