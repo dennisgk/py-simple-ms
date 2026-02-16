@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Dict, Optional, Tuple
 
 import brotli
@@ -47,6 +49,17 @@ def b64d(s: str) -> bytes:
 def nonce_from_seq(seq: int) -> bytes:
     # 12-byte nonce: 4 zero bytes + 8-byte big-endian seq
     return (b"\x00" * 4) + seq.to_bytes(8, "big", signed=False)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def encode_message(msg: dict) -> bytes:
@@ -262,6 +275,44 @@ class ServerApp:
 
         st.fh.close()
         return {"ok": True}
+
+    def mount_tree_diff(self, base_path: str, files: list) -> Dict[str, Any]:
+        base = Path(base_path).resolve()
+        needed = []
+        invalid = []
+
+        for item in files:
+            rel_path = str(item.get("rel_path", ""))
+            expected = str(item.get("sha256", ""))
+            rel_parts = PurePosixPath(rel_path).parts
+            if not rel_path or PurePosixPath(rel_path).is_absolute() or ".." in rel_parts:
+                invalid.append(rel_path)
+                continue
+
+            dst = (base / Path(rel_path)).resolve()
+            try:
+                dst.relative_to(base)
+            except ValueError:
+                invalid.append(rel_path)
+                continue
+
+            if not dst.is_file():
+                needed.append(rel_path)
+                continue
+
+            try:
+                current = sha256_file(dst)
+            except Exception:
+                needed.append(rel_path)
+                continue
+
+            if current != expected:
+                needed.append(rel_path)
+
+        if invalid:
+            return {"ok": False, "error": "invalid rel_path entries", "invalid": invalid}
+
+        return {"ok": True, "total": len(files), "needed": needed}
 
     # ---------------------------
     # sessions
@@ -481,6 +532,12 @@ class ServerApp:
 
             if cmd == "file_get_end":
                 await reply(self.file_get_end(tunnel_id, str(obj["download_id"])))
+                return
+
+            if cmd == "mount_tree_diff":
+                base_path = str(obj["base_path"])
+                files = list(obj.get("files", []))
+                await reply(self.mount_tree_diff(base_path, files))
                 return
 
             if cmd == "session_start":

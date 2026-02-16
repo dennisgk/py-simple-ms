@@ -3,11 +3,13 @@ import asyncio
 import argparse
 import base64
 import contextlib
+import hashlib
 import json
 import secrets
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Dict, Optional
 
 import brotli
 import websockets
@@ -41,6 +43,17 @@ def b64d(s: str) -> bytes:
 
 def nonce_from_seq(seq: int) -> bytes:
     return (b"\x00" * 4) + seq.to_bytes(8, "big", signed=False)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def encode_message(msg: dict) -> bytes:
@@ -281,6 +294,62 @@ class RemoteServerClient:
 
     async def session_stop(self, session_id: str) -> dict:
         return await self.request("session_stop", session_id=session_id)
+
+    async def mount_tree(
+        self,
+        local_path: str,
+        server_path: str,
+        mount_file: Optional[Callable[[str], bool]] = None,
+    ) -> dict:
+        local_root = Path(local_path).resolve()
+        if not local_root.exists() or not local_root.is_dir():
+            return {"ok": False, "error": f"local path is not a directory: {local_path}"}
+
+        manifest = []
+        file_map: Dict[str, Path] = {}
+
+        for path in local_root.rglob("*"):
+            if not path.is_file():
+                continue
+
+            path_str = str(path)
+            if mount_file and not mount_file(path_str):
+                continue
+
+            rel_path = path.relative_to(local_root).as_posix()
+            file_map[rel_path] = path
+            manifest.append(
+                {
+                    "rel_path": rel_path,
+                    "sha256": sha256_file(path),
+                    "size": path.stat().st_size,
+                }
+            )
+
+        diff = await self.request("mount_tree_diff", base_path=server_path, files=manifest)
+        if not diff.get("ok"):
+            return diff
+
+        needed = diff.get("needed", [])
+        uploaded = 0
+
+        for rel_path in needed:
+            src = file_map.get(rel_path)
+            if src is None:
+                return {"ok": False, "error": f"server requested unknown file: {rel_path}"}
+
+            dst = str(PurePosixPath(server_path) / rel_path)
+            resp = await self.file_put(dst, src.read_bytes())
+            if not resp.get("ok"):
+                return {"ok": False, "error": f"failed uploading {rel_path}", "upload_error": resp}
+            uploaded += 1
+
+        return {
+            "ok": True,
+            "scanned": len(manifest),
+            "needed": len(needed),
+            "uploaded": uploaded,
+        }
 
 
 # ---------------------------
