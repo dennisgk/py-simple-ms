@@ -56,6 +56,9 @@ Progress is printed on the client command line for `file_put`, `file_get`, and `
 - `file_put`, `file_get`, and `mount_tree` support `transfer_mode="webrtc"`.
 - If WebRTC setup fails, client falls back automatically to websocket transfer.
 - Server requires `aiortc` installed (included in `py-simple-ms-server/requirements.txt`).
+- Proxy now advertises ICE server info to both client and server during registration/tunnel open.
+- If no proxy ICE info is available, both sides default to `stun:stun.l.google.com:19302`.
+- Optional overrides still supported with `WEBRTC_ICE_SERVERS_JSON` (or client CLI arg).
 
 Examples:
 
@@ -64,6 +67,20 @@ await c.file_put("/remote/data.bin", "local/data.bin", transfer_mode="webrtc")
 await c.file_get("/remote/data.bin", "local/data.bin", transfer_mode="webrtc")
 await c.mount_tree("/remote/workflow", "./workflow", transfer_mode="webrtc", chunk_size=2*1024*1024)
 ```
+
+Optional ICE config example (same JSON on both sides):
+
+```bash
+export WEBRTC_ICE_SERVERS_JSON='[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:turn.example.com:3478"],"username":"user","credential":"pass"}]'
+```
+
+Client CLI can override with:
+
+```bash
+--webrtc-ice-servers-json '[{"urls":["stun:stun.l.google.com:19302"]}]'
+```
+
+When using `py-simple-ms-proxy/docker-compose.yml`, TURN is started automatically and proxy advertises both STUN and TURN to clients/servers.
 
 ## Session Exec Streaming
 
@@ -179,6 +196,15 @@ docker compose -f py-simple-ms-proxy/docker-compose.yml down
 ```
 
 Set `PROXY_PSK` in your shell (or `.env` for compose) before `docker compose up`.
+
+For TURN reachability from client/server hosts, set:
+
+```bash
+export TURN_PUBLIC_HOST=<host-or-ip-reachable-by-both-sides>
+export TURN_EXTERNAL_IP=<public-ip-of-turn-host>
+export TURN_USER=pyms
+export TURN_PASSWORD=pyms-pass
+```
 
 ## Notes
 

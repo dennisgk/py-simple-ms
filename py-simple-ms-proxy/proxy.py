@@ -39,8 +39,9 @@ class Tunnel:
 
 
 class Proxy:
-    def __init__(self, proxy_psk: str) -> None:
+    def __init__(self, proxy_psk: str, ice_servers: list[dict]) -> None:
         self.proxy_psk = proxy_psk
+        self.ice_servers = ice_servers
         self.servers_by_name: Dict[str, Peer] = {}
         self.clients_by_ws: Dict[WebSocketServerProtocol, Peer] = {}
         self.tunnels: Dict[str, Tunnel] = {}
@@ -78,7 +79,7 @@ class Proxy:
                     # Replace existing server registration if any
                     peer = Peer(ws=ws, kind="server", name=name)
                     self.servers_by_name[name] = peer
-                    await self._send(ws, {"type": "registered", "name": name})
+                    await self._send(ws, {"type": "registered", "name": name, "ice_servers": self.ice_servers})
                     continue
 
                 if mtype == "register_client":
@@ -89,7 +90,7 @@ class Proxy:
                     client_id = str(msg.get("client_id", "")).strip() or f"client-{secrets.token_hex(4)}"
                     peer = Peer(ws=ws, kind="client", name=client_id)
                     self.clients_by_ws[ws] = peer
-                    await self._send(ws, {"type": "registered", "client_id": client_id})
+                    await self._send(ws, {"type": "registered", "client_id": client_id, "ice_servers": self.ice_servers})
                     continue
 
                 if mtype == "heartbeat":
@@ -112,8 +113,14 @@ class Proxy:
                     self.tunnels[tunnel_id] = t
 
                     # Tell both ends tunnel is open
-                    await self._send(peer.ws, {"type": "tunnel_open", "tunnel_id": tunnel_id, "peer": server_name})
-                    await self._send(srv.ws, {"type": "tunnel_open", "tunnel_id": tunnel_id, "peer": peer.name})
+                    await self._send(
+                        peer.ws,
+                        {"type": "tunnel_open", "tunnel_id": tunnel_id, "peer": server_name, "ice_servers": self.ice_servers},
+                    )
+                    await self._send(
+                        srv.ws,
+                        {"type": "tunnel_open", "tunnel_id": tunnel_id, "peer": peer.name, "ice_servers": self.ice_servers},
+                    )
                     continue
 
                 if mtype == "tunnel_data":
@@ -163,7 +170,28 @@ async def main() -> None:
     if not proxy_psk:
         raise RuntimeError("Set PROXY_PSK environment variable for proxy access control.")
 
-    proxy = Proxy(proxy_psk=proxy_psk)
+    ice_servers_json = os.environ.get("PROXY_ICE_SERVERS_JSON", "").strip()
+    if ice_servers_json:
+        try:
+            ice_servers = json.loads(ice_servers_json)
+        except Exception as e:
+            raise RuntimeError(f"Invalid PROXY_ICE_SERVERS_JSON: {e}") from e
+    else:
+        turn_host = os.environ.get("TURN_PUBLIC_HOST", "127.0.0.1").strip()
+        turn_port = int(os.environ.get("TURN_PORT", "3478"))
+        turn_user = os.environ.get("TURN_USER", "").strip()
+        turn_password = os.environ.get("TURN_PASSWORD", "").strip()
+        ice_servers = [{"urls": [f"stun:{turn_host}:{turn_port}"]}]
+        if turn_user and turn_password:
+            ice_servers.append(
+                {
+                    "urls": [f"turn:{turn_host}:{turn_port}?transport=udp", f"turn:{turn_host}:{turn_port}?transport=tcp"],
+                    "username": turn_user,
+                    "credential": turn_password,
+                }
+            )
+
+    proxy = Proxy(proxy_psk=proxy_psk, ice_servers=ice_servers)
     host = "0.0.0.0"
     port = 8765
     print(f"[proxy] listening on ws://{host}:{port}")

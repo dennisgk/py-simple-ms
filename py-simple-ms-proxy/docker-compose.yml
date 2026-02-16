@@ -7,6 +7,33 @@ services:
     container_name: py-simple-ms-proxy
     environment:
       - PROXY_PSK=${PROXY_PSK}
+      - TURN_PUBLIC_HOST=${TURN_PUBLIC_HOST:-127.0.0.1}
+      - TURN_PORT=${TURN_PORT:-3478}
+      - TURN_USER=${TURN_USER:-pyms}
+      - TURN_PASSWORD=${TURN_PASSWORD:-pyms-pass}
     ports:
       - "8765:8765"
+    restart: unless-stopped
+    depends_on:
+      - turn
+
+  turn:
+    image: coturn/coturn:4.6.3
+    container_name: py-simple-ms-turn
+    command:
+      - -n
+      - --listening-port=3478
+      - --realm=${TURN_REALM:-py-simple-ms.local}
+      - --lt-cred-mech
+      - --user=${TURN_USER:-pyms}:${TURN_PASSWORD:-pyms-pass}
+      - --fingerprint
+      - --no-cli
+      - --listening-ip=0.0.0.0
+      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+      - --min-port=49160
+      - --max-port=49200
+    ports:
+      - "${TURN_PORT:-3478}:3478/tcp"
+      - "${TURN_PORT:-3478}:3478/udp"
+      - "49160-49200:49160-49200/udp"
     restart: unless-stopped

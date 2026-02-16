@@ -110,11 +110,19 @@ class DownloadState:
 
 
 class ServerApp:
-    def __init__(self, proxy_url: str, server_name: str, psk_hex: str, proxy_psk: str) -> None:
+    def __init__(
+        self,
+        proxy_url: str,
+        server_name: str,
+        psk_hex: str,
+        proxy_psk: str,
+        webrtc_ice_servers_json: str = "",
+    ) -> None:
         self.proxy_url = proxy_url
         self.server_name = server_name
         self.psk = bytes.fromhex(psk_hex)
         self.proxy_psk = proxy_psk
+        self.webrtc_ice_servers_json = webrtc_ice_servers_json.strip()
 
         # tunnel_id -> crypto (after auth)
         self.crypto: Dict[str, TunnelCrypto] = {}
@@ -128,6 +136,8 @@ class ServerApp:
         self.downloads: Dict[str, Dict[str, DownloadState]] = {}
         # tunnel_id -> transfer_id -> RTC peer connection
         self.rtc_transfers: Dict[str, Dict[str, Any]] = {}
+        # tunnel_id -> advertised ICE server list from proxy
+        self.tunnel_ice_servers: Dict[str, list] = {}
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
 
@@ -437,6 +447,7 @@ class ServerApp:
                 asyncio.create_task(pc.close())
             self.rtc_transfers.get(tunnel_id, {}).pop(transfer_id, None)
         self.rtc_transfers.pop(tunnel_id, None)
+        self.tunnel_ice_servers.pop(tunnel_id, None)
 
         self.crypto.pop(tunnel_id, None)
         self.handshake.pop(tunnel_id, None)
@@ -450,12 +461,38 @@ class ServerApp:
 
     async def webrtc_transfer_open(self, tunnel_id: str, mode: str, path: str, chunk_size: int, offer_sdp: str, offer_type: str) -> Dict[str, Any]:
         try:
-            from aiortc import RTCPeerConnection, RTCSessionDescription
+            from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
         except Exception as e:
             return {"ok": False, "error": f"aiortc unavailable: {e}"}
 
+        ice_json = self.webrtc_ice_servers_json or os.environ.get("WEBRTC_ICE_SERVERS_JSON", "").strip()
+        if ice_json:
+            try:
+                server_defs = json.loads(ice_json)
+            except Exception as e:
+                return {"ok": False, "error": f"invalid WEBRTC_ICE_SERVERS_JSON: {e}"}
+        elif tunnel_id in self.tunnel_ice_servers:
+            server_defs = self.tunnel_ice_servers[tunnel_id]
+        else:
+            server_defs = [{"urls": ["stun:stun.l.google.com:19302"]}]
+
+        ice_servers = []
+        for item in server_defs:
+            urls = item.get("urls", [])
+            if isinstance(urls, str):
+                urls = [urls]
+            if not urls:
+                continue
+            ice_servers.append(
+                RTCIceServer(
+                    urls=urls,
+                    username=str(item.get("username", "")),
+                    credential=str(item.get("credential", "")),
+                )
+            )
+
         transfer_id = secrets.token_hex(8)
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         self.rtc_transfers.setdefault(tunnel_id, {})[transfer_id] = pc
 
         async def close_pc() -> None:
@@ -754,6 +791,9 @@ class ServerApp:
 
                     if mtype == "tunnel_open":
                         tunnel_id = msg["tunnel_id"]
+                        ice = msg.get("ice_servers")
+                        if isinstance(ice, list):
+                            self.tunnel_ice_servers[tunnel_id] = ice
                         self.sessions.setdefault(tunnel_id, {})
                         self.uploads.setdefault(tunnel_id, {})
                         self.downloads.setdefault(tunnel_id, {})
@@ -799,6 +839,7 @@ def main() -> None:
     proxy_url = os.environ.get("PROXY_URL", "ws://127.0.0.1:8765")
     server_name = os.environ.get("SERVER_NAME", "server-1")
     proxy_psk = os.environ.get("PROXY_PSK", "").strip()
+    webrtc_ice_servers_json = os.environ.get("WEBRTC_ICE_SERVERS_JSON", "").strip()
     psk_hex = os.environ.get("PSK_HEX")
     if not proxy_psk:
         print("Set PROXY_PSK to the shared proxy access key.", file=sys.stderr)
@@ -807,7 +848,7 @@ def main() -> None:
         print("Set PSK_HEX to a hex-encoded shared key (e.g. 64 hex chars = 32 bytes).", file=sys.stderr)
         sys.exit(1)
 
-    app = ServerApp(proxy_url, server_name, psk_hex, proxy_psk)
+    app = ServerApp(proxy_url, server_name, psk_hex, proxy_psk, webrtc_ice_servers_json)
     asyncio.run(app.run())
 
 

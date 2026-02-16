@@ -5,6 +5,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import os
 import secrets
 import sys
 from dataclasses import dataclass
@@ -85,12 +86,14 @@ class RemoteServerClient:
         server_name: str,
         psk_hex: str,
         proxy_psk: str,
+        webrtc_ice_servers_json: str = "",
         client_id: str = "",
     ) -> None:
         self.proxy_url = proxy_url
         self.server_name = server_name
         self.psk = bytes.fromhex(psk_hex)
         self.proxy_psk = proxy_psk
+        self.webrtc_ice_servers_json = webrtc_ice_servers_json.strip()
         self.client_id = client_id or f"client-{secrets.token_hex(4)}"
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -99,6 +102,7 @@ class RemoteServerClient:
 
         self._pending: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._proxy_ice_servers: Optional[list[dict]] = None
 
         # handshake state
         self._client_nonce: Optional[bytes] = None
@@ -152,10 +156,16 @@ class RemoteServerClient:
             mtype = msg.get("type")
 
             if mtype == "registered":
+                ice = msg.get("ice_servers")
+                if isinstance(ice, list):
+                    self._proxy_ice_servers = ice
                 continue
 
             if mtype == "tunnel_open":
                 self.tunnel_id = msg["tunnel_id"]
+                ice = msg.get("ice_servers")
+                if isinstance(ice, list):
+                    self._proxy_ice_servers = ice
                 # start auth handshake immediately
                 self._client_nonce = secrets.token_bytes(32)
                 await self._send_tunnel_plain({"type": "auth_hello", "client_nonce_b64": b64e(self._client_nonce)})
@@ -252,11 +262,37 @@ class RemoteServerClient:
 
     async def _webrtc_open_transfer(self, mode: str, remote_path: str, chunk_size: int) -> tuple:
         try:
-            from aiortc import RTCPeerConnection, RTCSessionDescription
+            from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
         except Exception as e:
             raise RuntimeError(f"aiortc unavailable: {e}") from e
 
-        pc = RTCPeerConnection()
+        ice_json = self.webrtc_ice_servers_json or os.environ.get("WEBRTC_ICE_SERVERS_JSON", "").strip()
+        if ice_json:
+            try:
+                server_defs = json.loads(ice_json)
+            except Exception as e:
+                raise RuntimeError(f"invalid WEBRTC_ICE_SERVERS_JSON: {e}") from e
+        elif self._proxy_ice_servers is not None:
+            server_defs = self._proxy_ice_servers
+        else:
+            server_defs = [{"urls": ["stun:stun.l.google.com:19302"]}]
+
+        ice_servers = []
+        for item in server_defs:
+            urls = item.get("urls", [])
+            if isinstance(urls, str):
+                urls = [urls]
+            if not urls:
+                continue
+            ice_servers.append(
+                RTCIceServer(
+                    urls=urls,
+                    username=str(item.get("username", "")),
+                    credential=str(item.get("credential", "")),
+                )
+            )
+
+        pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         channel = pc.createDataChannel("file")
         open_fut = asyncio.get_running_loop().create_future()
         msg_q: asyncio.Queue = asyncio.Queue()
@@ -649,8 +685,20 @@ class RemoteServerClient:
 # ---------------------------
 # Example CLI usage
 # ---------------------------
-async def demo(proxy_url: str, server_name: str, psk_hex: str, proxy_psk: str) -> None:
-    c = RemoteServerClient(proxy_url=proxy_url, server_name=server_name, psk_hex=psk_hex, proxy_psk=proxy_psk)
+async def demo(
+    proxy_url: str,
+    server_name: str,
+    psk_hex: str,
+    proxy_psk: str,
+    webrtc_ice_servers_json: str = "",
+) -> None:
+    c = RemoteServerClient(
+        proxy_url=proxy_url,
+        server_name=server_name,
+        psk_hex=psk_hex,
+        proxy_psk=proxy_psk,
+        webrtc_ice_servers_json=webrtc_ice_servers_json,
+    )
     await c.connect()
 
     print(await c.pyenv_list())
@@ -671,12 +719,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-name", required=True, help="Registered server name to connect to")
     parser.add_argument("--psk-hex", required=True, help="Hex-encoded pre-shared key")
     parser.add_argument("--proxy-psk", required=True, help="Shared proxy access key")
+    parser.add_argument(
+        "--webrtc-ice-servers-json",
+        default="",
+        help="Optional JSON list of ICE servers (otherwise uses WEBRTC_ICE_SERVERS_JSON or default Google STUN)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    asyncio.run(demo(args.proxy_url, args.server_name, args.psk_hex, args.proxy_psk))
+    asyncio.run(demo(args.proxy_url, args.server_name, args.psk_hex, args.proxy_psk, args.webrtc_ice_servers_json))
 
 
 if __name__ == "__main__":
