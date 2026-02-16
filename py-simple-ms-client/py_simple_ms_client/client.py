@@ -301,9 +301,16 @@ class RemoteServerClient:
         server_path: str,
         mount_file: Optional[Callable[[str], bool]] = None,
     ) -> dict:
-        local_root = Path(local_path).resolve()
+        local_path_obj = Path(local_path)
+        local_root = local_path_obj.resolve()
         if not local_root.exists() or not local_root.is_dir():
             return {"ok": False, "error": f"local path is not a directory: {local_path}"}
+
+        target_base = server_path
+        if not local_path_obj.is_absolute():
+            local_dir_name = local_path_obj.name
+            if local_dir_name:
+                target_base = str(PurePosixPath(server_path) / local_dir_name)
 
         manifest = []
         file_map: Dict[str, Path] = {}
@@ -326,11 +333,12 @@ class RemoteServerClient:
                 }
             )
 
-        diff = await self.request("mount_tree_diff", base_path=server_path, files=manifest)
+        diff = await self.request("mount_tree_diff", base_path=target_base, files=manifest, prune=True)
         if not diff.get("ok"):
             return diff
 
         needed = diff.get("needed", [])
+        deleted = int(diff.get("deleted", 0))
         uploaded = 0
 
         for rel_path in needed:
@@ -338,7 +346,7 @@ class RemoteServerClient:
             if src is None:
                 return {"ok": False, "error": f"server requested unknown file: {rel_path}"}
 
-            dst = str(PurePosixPath(server_path) / rel_path)
+            dst = str(PurePosixPath(target_base) / rel_path)
             resp = await self.file_put(dst, src.read_bytes())
             if not resp.get("ok"):
                 return {"ok": False, "error": f"failed uploading {rel_path}", "upload_error": resp}
@@ -346,9 +354,11 @@ class RemoteServerClient:
 
         return {
             "ok": True,
+            "target_base": target_base,
             "scanned": len(manifest),
             "needed": len(needed),
             "uploaded": uploaded,
+            "deleted": deleted,
         }
 
 

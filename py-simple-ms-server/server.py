@@ -276,8 +276,11 @@ class ServerApp:
         st.fh.close()
         return {"ok": True}
 
-    def mount_tree_diff(self, base_path: str, files: list) -> Dict[str, Any]:
+    def mount_tree_diff(self, base_path: str, files: list, prune: bool = False) -> Dict[str, Any]:
         base = Path(base_path).resolve()
+        base.mkdir(parents=True, exist_ok=True)
+
+        expected_rel_paths = set()
         needed = []
         invalid = []
 
@@ -288,6 +291,7 @@ class ServerApp:
             if not rel_path or PurePosixPath(rel_path).is_absolute() or ".." in rel_parts:
                 invalid.append(rel_path)
                 continue
+            expected_rel_paths.add(rel_path)
 
             dst = (base / Path(rel_path)).resolve()
             try:
@@ -312,7 +316,24 @@ class ServerApp:
         if invalid:
             return {"ok": False, "error": "invalid rel_path entries", "invalid": invalid}
 
-        return {"ok": True, "total": len(files), "needed": needed}
+        deleted = 0
+        if prune:
+            for path in base.rglob("*"):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(base).as_posix()
+                if rel not in expected_rel_paths:
+                    with contextlib.suppress(Exception):
+                        path.unlink()
+                        deleted += 1
+
+            # Cleanup empty directories after pruning extra files.
+            for path in sorted(base.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                if path.is_dir():
+                    with contextlib.suppress(Exception):
+                        path.rmdir()
+
+        return {"ok": True, "total": len(files), "needed": needed, "deleted": deleted}
 
     # ---------------------------
     # sessions
@@ -537,7 +558,8 @@ class ServerApp:
             if cmd == "mount_tree_diff":
                 base_path = str(obj["base_path"])
                 files = list(obj.get("files", []))
-                await reply(self.mount_tree_diff(base_path, files))
+                prune = bool(obj.get("prune", False))
+                await reply(self.mount_tree_diff(base_path, files, prune=prune))
                 return
 
             if cmd == "session_start":
