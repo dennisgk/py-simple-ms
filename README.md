@@ -2,6 +2,13 @@
 
 A minimal Python client/proxy/server protocol for remote Python environment and file/session operations.
 
+## Clone
+
+```bash
+git clone https://github.com/dennisgk/py-simple-ms.git
+cd py-simple-ms
+```
+
 ## Components
 
 - `py-simple-ms-proxy/proxy.py`: WebSocket relay that routes messages between client and server by tunnel ID.
@@ -43,15 +50,15 @@ Download (server -> client):
 
 ## Session Exec Streaming
 
-- `session_exec` now streams runtime output while code is still executing.
+- `session_exec` streams runtime output while code is still executing.
 - The worker emits line-delimited events for `stdout` and `stderr`.
 - Server forwards these events as encrypted `session_stream` messages before the final `exec_result`.
 
 ## Setup
 
-Install dependencies per component.
+Install dependencies per component:
 
-```powershell
+```bash
 pip install -r py-simple-ms-proxy/requirements.txt
 pip install -r py-simple-ms-server/requirements.txt
 pip install -r py-simple-ms-client/requirements.txt
@@ -61,34 +68,45 @@ pip install -r py-simple-ms-client/requirements.txt
 
 Use the same `PSK_HEX` for client and server.
 
-```powershell
+```bash
 # Example 32-byte key (64 hex chars)
-$env:PSK_HEX = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+export PSK_HEX=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 ```
 
-Start proxy:
+Start proxy (keeps env-style config):
 
-```powershell
-python py-simple-ms-proxy/proxy.py
+```bash
+python3 py-simple-ms-proxy/proxy.py
 ```
 
-Start server:
+Start server (keeps env-style config):
 
-```powershell
-$env:PROXY_URL = "ws://127.0.0.1:8765"
-$env:SERVER_NAME = "server-1"
-python py-simple-ms-server/server.py
+```bash
+export PROXY_URL=ws://127.0.0.1:8765
+export SERVER_NAME=server-1
+python3 py-simple-ms-server/server.py
 ```
 
-Start client demo:
+Start client demo (pass required args directly):
 
-```powershell
-$env:PROXY_URL = "ws://127.0.0.1:8765"
-$env:SERVER_NAME = "server-1"
-python py-simple-ms-client/client.py
+```bash
+python3 py-simple-ms-client/client.py \
+  --proxy-url ws://127.0.0.1:8765 \
+  --server-name server-1 \
+  --psk-hex "$PSK_HEX"
+```
+
+## Docker (Proxy Sample)
+
+Sample Dockerfile is at `py-simple-ms-proxy/Dockerfile` and clones this repo during build.
+
+```bash
+docker build -f py-simple-ms-proxy/Dockerfile -t py-simple-ms-proxy:sample .
+docker run --rm -p 8765:8765 py-simple-ms-proxy:sample
 ```
 
 ## Notes
 
 - Server-side pyenv commands require `pyenv` (and for env listing, `pyenv-virtualenv`).
 - Session execution runs code inside the selected `PYENV_VERSION` via `pyenv exec python`.
+- File deletion is no longer a protocol command; perform deletes via Python code executed in a session.

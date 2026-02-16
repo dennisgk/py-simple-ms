@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import asyncio
+import argparse
 import base64
 import contextlib
 import json
-import os
 import secrets
 import sys
 from dataclasses import dataclass
@@ -66,8 +66,9 @@ class TunnelCrypto:
 
 
 class RemoteServerClient:
-    def __init__(self, proxy_url: str, psk_hex: str, client_id: str = "") -> None:
+    def __init__(self, proxy_url: str, server_name: str, psk_hex: str, client_id: str = "") -> None:
         self.proxy_url = proxy_url
+        self.server_name = server_name
         self.psk = bytes.fromhex(psk_hex)
         self.client_id = client_id or f"client-{secrets.token_hex(4)}"
 
@@ -187,11 +188,11 @@ class RemoteServerClient:
                             fut.set_result(obj)
                     continue
 
-    async def connect(self, server_name: str) -> None:
+    async def connect(self) -> None:
         self.ws = await websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30)
         await self._send({"type": "register_client", "client_id": self.client_id})
         self._reader_task = asyncio.create_task(self._reader())
-        await self._send({"type": "client_connect", "server_name": server_name})
+        await self._send({"type": "client_connect", "server_name": self.server_name})
 
         # Wait until crypto is set (auth complete)
         while self.crypto is None:
@@ -285,16 +286,9 @@ class RemoteServerClient:
 # ---------------------------
 # Example CLI usage
 # ---------------------------
-async def demo() -> None:
-    proxy_url = os.environ.get("PROXY_URL", "ws://127.0.0.1:8765")
-    server_name = os.environ.get("SERVER_NAME", "server-1")
-    psk_hex = os.environ.get("PSK_HEX")
-    if not psk_hex:
-        print("Set PSK_HEX to the same hex key as server.", file=sys.stderr)
-        sys.exit(1)
-
-    c = RemoteServerClient(proxy_url, psk_hex)
-    await c.connect(server_name)
+async def demo(proxy_url: str, server_name: str, psk_hex: str) -> None:
+    c = RemoteServerClient(proxy_url=proxy_url, server_name=server_name, psk_hex=psk_hex)
+    await c.connect()
 
     print(await c.pyenv_list())
 
@@ -308,5 +302,14 @@ async def demo() -> None:
     await c.close()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="py-simple-ms client")
+    parser.add_argument("--proxy-url", required=True, help="Proxy websocket URL, e.g. ws://127.0.0.1:8765")
+    parser.add_argument("--server-name", required=True, help="Registered server name to connect to")
+    parser.add_argument("--psk-hex", required=True, help="Hex-encoded pre-shared key")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    asyncio.run(demo())
+    args = parse_args()
+    asyncio.run(demo(args.proxy_url, args.server_name, args.psk_hex))
