@@ -590,7 +590,7 @@ class ServerApp:
             await reply({"ok": False, "error": f"exception: {e}"})
 
     async def run(self) -> None:
-        async with websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30) as ws:
+        async with websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30, max_size=None) as ws:
             self.ws = ws
             await self.send({"type": "register_server", "name": self.server_name, "proxy_psk": self.proxy_psk})
             print(f"[server] registered as {self.server_name}")

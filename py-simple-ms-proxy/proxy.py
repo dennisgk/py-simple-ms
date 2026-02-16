@@ -167,7 +167,7 @@ async def main() -> None:
     host = "0.0.0.0"
     port = 8765
     print(f"[proxy] listening on ws://{host}:{port}")
-    async with websockets.serve(proxy.handler, host, port, ping_interval=30, ping_timeout=30):
+    async with websockets.serve(proxy.handler, host, port, ping_interval=30, ping_timeout=30, max_size=None):
         await asyncio.Future()
 
 

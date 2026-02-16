@@ -214,7 +214,7 @@ class RemoteServerClient:
                     continue
 
     async def connect(self) -> None:
-        self.ws = await websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30)
+        self.ws = await websockets.connect(self.proxy_url, ping_interval=30, ping_timeout=30, max_size=None)
         await self._send({"type": "register_client", "client_id": self.client_id, "proxy_psk": self.proxy_psk})
         self._reader_task = asyncio.create_task(self._reader())
         await self._send({"type": "client_connect", "server_name": self.server_name})
