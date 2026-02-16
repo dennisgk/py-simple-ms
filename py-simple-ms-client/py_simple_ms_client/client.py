@@ -9,7 +9,7 @@ import secrets
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 import brotli
 import websockets
@@ -245,9 +245,35 @@ class RemoteServerClient:
     async def pyenv_delete(self, env_name: str) -> dict:
         return await self.request("pyenv_delete", env_name=env_name)
 
-    async def file_put(self, path: str, data: bytes, chunk_size: int = FILE_CHUNK_SIZE) -> dict:
-        if len(data) <= FILE_CHUNK_THRESHOLD:
-            return await self.request("file_put", path=path, data_b64=b64e(data))
+    async def file_put(self, path: str, data: Union[bytes, str, Path], chunk_size: int = FILE_CHUNK_SIZE) -> dict:
+        # bytes -> upload content directly.
+        # str/Path -> treated as a local file path to upload.
+        if isinstance(data, bytes):
+            if len(data) <= FILE_CHUNK_THRESHOLD:
+                return await self.request("file_put", path=path, data_b64=b64e(data))
+
+            start = await self.request("file_put_begin", path=path)
+            if not start.get("ok"):
+                return start
+
+            upload_id = start["upload_id"]
+            seq = 0
+            for offset in range(0, len(data), chunk_size):
+                chunk = data[offset:offset + chunk_size]
+                resp = await self.request("file_put_chunk", upload_id=upload_id, seq=seq, data_b64=b64e(chunk))
+                if not resp.get("ok"):
+                    await self.request("file_put_abort", upload_id=upload_id)
+                    return resp
+                seq += 1
+            return await self.request("file_put_end", upload_id=upload_id)
+
+        local_path = Path(data)
+        if not local_path.exists() or not local_path.is_file():
+            return {"ok": False, "error": f"local source file not found: {local_path}"}
+
+        file_size = local_path.stat().st_size
+        if file_size <= FILE_CHUNK_THRESHOLD:
+            return await self.request("file_put", path=path, data_b64=b64e(local_path.read_bytes()))
 
         start = await self.request("file_put_begin", path=path)
         if not start.get("ok"):
@@ -255,25 +281,39 @@ class RemoteServerClient:
 
         upload_id = start["upload_id"]
         seq = 0
-        for offset in range(0, len(data), chunk_size):
-            chunk = data[offset:offset + chunk_size]
-            resp = await self.request("file_put_chunk", upload_id=upload_id, seq=seq, data_b64=b64e(chunk))
-            if not resp.get("ok"):
-                await self.request("file_put_abort", upload_id=upload_id)
-                return resp
-            seq += 1
-
+        with local_path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                resp = await self.request("file_put_chunk", upload_id=upload_id, seq=seq, data_b64=b64e(chunk))
+                if not resp.get("ok"):
+                    await self.request("file_put_abort", upload_id=upload_id)
+                    return resp
+                seq += 1
         return await self.request("file_put_end", upload_id=upload_id)
 
-    async def file_get(self, path: str, chunk_size: int = FILE_CHUNK_SIZE) -> bytes:
+    async def file_get(
+        self,
+        path: str,
+        save_to: Optional[Union[str, Path]] = None,
+        chunk_size: int = FILE_CHUNK_SIZE,
+    ) -> Union[bytes, dict]:
         start = await self.request("file_get_begin", path=path)
         if not start.get("ok"):
             raise FileNotFoundError(start.get("error", "file_get_begin failed"))
 
         download_id = start["download_id"]
-        chunks = bytearray()
+        written = 0
+        chunks = bytearray() if save_to is None else None
+        out_path = Path(save_to) if save_to is not None else None
+        out_f = None
 
         try:
+            if out_path is not None:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_f = out_path.open("wb")
+
             while True:
                 resp = await self.request("file_get_chunk", download_id=download_id, chunk_size=chunk_size)
                 if not resp.get("ok"):
@@ -281,13 +321,24 @@ class RemoteServerClient:
 
                 data_b64 = resp.get("data_b64", "")
                 if data_b64:
-                    chunks.extend(b64d(data_b64))
+                    chunk = b64d(data_b64)
+                    written += len(chunk)
+                    if out_f is not None:
+                        out_f.write(chunk)
+                    else:
+                        assert chunks is not None
+                        chunks.extend(chunk)
 
                 if resp.get("done"):
                     break
         finally:
+            if out_f is not None:
+                out_f.close()
             await self.request("file_get_end", download_id=download_id)
 
+        if out_path is not None:
+            return {"ok": True, "path": str(out_path), "bytes": written}
+        assert chunks is not None
         return bytes(chunks)
 
     async def session_start(self, env_name: str, cwd: str) -> dict:
@@ -301,8 +352,8 @@ class RemoteServerClient:
 
     async def mount_tree(
         self,
-        local_path: str,
         server_path: str,
+        local_path: str,
         mount_file: Optional[Callable[[str], bool]] = None,
     ) -> dict:
         local_path_obj = Path(local_path)
