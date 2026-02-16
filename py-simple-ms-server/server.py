@@ -345,6 +345,10 @@ class ServerApp:
         # Use PYENV_VERSION to choose env; run python worker with -u unbuffered
         env = os.environ.copy()
         env["PYENV_VERSION"] = env_name
+        env.setdefault("PY_COLORS", "1")
+        env.setdefault("FORCE_COLOR", "1")
+        env.setdefault("CLICOLOR_FORCE", "1")
+        env.setdefault("TERM", "xterm-256color")
 
         worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session_worker.py")
         proc = subprocess.Popen(

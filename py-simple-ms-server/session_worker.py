@@ -12,6 +12,8 @@ import traceback
 
 GLOBAL_SCOPE = {"__name__": "__main__"}
 ORIG_STDOUT = sys.stdout
+ANSI_RED = "\x1b[31m"
+ANSI_RESET = "\x1b[0m"
 
 
 def respond(obj: dict) -> None:
@@ -22,6 +24,7 @@ def respond(obj: dict) -> None:
 class StreamEmitter(io.TextIOBase):
     def __init__(self, stream_name: str) -> None:
         self.stream_name = stream_name
+        self.encoding = "utf-8"
 
     def write(self, s: str) -> int:
         if not s:
@@ -31,6 +34,10 @@ class StreamEmitter(io.TextIOBase):
 
     def flush(self) -> None:
         return
+
+    def isatty(self) -> bool:
+        # Encourage color-capable log formatters/libraries to keep ANSI output.
+        return True
 
 
 for line in sys.stdin:
@@ -63,8 +70,10 @@ for line in sys.stdin:
                 ok = False
                 tb = traceback.format_exc()
                 # Mirror uncaught execution errors to streamed stderr.
-                respond({"type": "stream", "stream": "stderr", "data": tb})
+                respond({"type": "stream", "stream": "stderr", "data": f"{ANSI_RED}{tb}{ANSI_RESET}"})
 
         respond({"type": "exec_result", "ok": ok, "traceback": tb})
     except Exception:
-        respond({"type": "error", "error": "bad json or worker exception", "traceback": traceback.format_exc()})
+        tb = traceback.format_exc()
+        respond({"type": "stream", "stream": "stderr", "data": f"{ANSI_RED}{tb}{ANSI_RESET}"})
+        respond({"type": "error", "error": "bad json or worker exception", "traceback": tb})
